@@ -1,0 +1,434 @@
+---
+title: "Final Assignment"
+author: "by Joud Alameh and Jad Assaf"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: readable
+    highlight: espresso
+    number_sections: no
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+
+
+# Introduction
+
+  Cardiovascular diseases remain a leading cause of mortality worldwide, emphasizing the critical need for accurate and timely identification of individuals at risk. In this data mining project, we delve into a comprehensive dataset that encompasses a myriad of features related to individuals' health, lifestyle, and medical history. The primary objective is to develop a predictive model capable of discerning whether a given patient is susceptible to heart disease or not.
+  
+# Libraries
+
+```{r}
+install.packages(c("car", "cluster", "DT", "ellipse", "emmeans", "flashClust", "graphics", "grDevices", "lattice", "leaps", "MASS", "multcompView", "scatterplot3d", "stats", "utils", "ggplot2", "ggrepel"))
+
+install.packages(c("abind", "cluster", "dendextend", "ggpubr", "grid", "stats", "reshape2", "ggrepel", "tidyr"))
+
+```
+
+
+```{r eval=TRUE}
+library(dplyr)
+library(corrplot)
+library(caret)
+library(pROC)
+library(MASS)
+library(class)
+library(seriation)
+library(rpart.plot)
+library(ipred)
+library(randomForest)
+library(gbm)
+library(corrr)
+library(ggcorrplot)
+library(factoextra)
+library(FactoMineR)
+library(NbClust)
+library(cluster)
+library(e1071)
+```
+
+
+# Dataset Overview
+
+A wide range of characteristics are included in the data set under consideration, such as `age` in years, `sex` either male of female, `type of chest pain` with varying levels, `maximum heart rate` achieved, `maximum blood pressure`, `cholesterol` levels, `fasting blood sugar` (fasting blood sugar > 120 mg/dl, either true or false), `resting electrocardiogram` results ( normal, having ST-T wave abnormalities or showing probable or definite left ventricular hypertrophy), `exercise-induced angina` (true or false), `depression` caused by exercise in comparison to rest (old peak), `slope` of the peak exercise ST segment (upsloping, flat, downsloping), and a binary `target variable` that indicates the presence or absence of heart disease. Every entry in the data set has a label indicating whether or not the person has received a heart disease diagnosis.
+
+# Analysizing the Correlation
+
+We now wish to investigate the relationship between the response variable and the characteristics. We may examine the relationship between our various attributes by using the correlation matrix. Our primary focus is on examining the relationship that exists between the various attributes and the `target` response component.
+
+```{r}
+heart.data = read.csv("heart_statlog_cleveland_hungary_final.csv",header=T,na.strings=c("", "na", "?"), stringsAsFactors = F)
+attach(heart.data)
+correlation <- cor(heart.data)
+corrplot(correlation, method = "number", addCoef.col = 1, number.cex = 0.7, bg = "black")
+```
+
+The features `resting.bp.s` and `resting.ecg` show very low correlation with $0.12$ and $0.07$ respectively, thus we will remove them. On the other hand, the `ST.slope`, `exercise.angina` and `chest.pain.type` all seem to be significant with values of $0.51$, $0.48$ and $0.46$ respectively.
+
+# Preprocessing
+
+We adapted a 3 step approach for preprocessing:
+
+- Identifying and dealing with missing values.
+- Encoding
+- Feature engineering
+- Splitting the dataset
+
+## Missing Values
+
+Fortunately, our data set had no missing data so there was no need to tune our model to deal with missing data.
+
+## Encoding
+
+Secondly, our data is encoded as follows:
+
+- Sex: 1 = male, 0= female
+- Chest Pain Type:
+    - Value 1: typical angina
+    - Value 2: atypical angina
+    - Value 3: non-anginal pain
+    - Value 4: asymptomatic
+- Fasting Blood Sugar: fasting blood sugar > 120 mg/dl; 1 = true; 0 = false
+- Resting electrocardiogram results: 
+    - Value 0: normal
+    - Value 1: having ST-T wave abnormality
+    - Value 2: Showing probable or definite left ventricular hypertrophy
+- Exercise induced angina : 1 = yes, 0 = no
+- the slope of the peak exercise ST segment:
+    - Value 1: upsloping
+    - Value 2: flat
+    - Value 3: downsloping
+- Class: 1 = heart disease, 0 = normal
+
+## Feature engineering
+
+According to the correlation matrix, the 2 features `oldpeak` and `ST.slope` had a value of $0.52$ which is the highest among the table, thus we decided to make an interaction term using them.
+
+```{r}
+heart.data$st.oldpeak = ST.slope*oldpeak
+```
+
+We also decided to remove the features with the lowest correlations as discussed above.
+
+```{r}
+heart.data = heart.data[, !(colnames(heart.data) %in% c("resting.ecg", "resting.bp.s"))]
+```
+
+## Splitting the data
+
+We decided to first shuffle the data set to avoid having imbalance. We then set a `seed` to get reproducible results. Finally, we split the data into 80% `training` set and 20% `test` set.
+
+```{r}
+set.seed(69)
+heart.data = heart.data[sample(1:nrow(heart.data)),]
+heart.train = heart.data[1:(nrow(heart.data) * 0.8),]
+heart.test = heart.data[(nrow(heart.data) * 0.8 + 1): (nrow(heart.data)),]
+
+nrow(heart.train)
+nrow(heart.test)
+
+```
+
+This is the corresponding number of rows for `training` and `test` sets, respectively.
+
+# Decision Trees
+
+Decision trees are favored in machine learning for their interpretability, accommodating both numeric and categorical data without stringent preprocessing requirements.
+
+We will start with the basic decision tree called the `unpruned` tree. Results show it yielded 29 leaf nodes.
+The test MSE obtained was $0.1722689$ which is considered good but may be improved by `pruning`.
+
+```{r}
+heart.tree.fit.unpruned = rpart(target~., data = heart.train, method = "class", control = rpart.control(cp = 0))
+printcp(heart.tree.fit.unpruned)
+plotcp(heart.tree.fit.unpruned)
+rpart.plot(heart.tree.fit.unpruned)
+
+heart.tree.fit.unpruned.pred = predict(heart.tree.fit.unpruned, heart.test, type = "class")
+heart.tree.fit.unpruned.testMSE = mean((heart.test$target-(as.numeric(heart.tree.fit.unpruned.pred) - 1))^2)
+heart.tree.fit.unpruned.testMSE
+
+
+```
+
+Looking at the graph, the CP corresponding to the lowest CV test MSE was equal to $0.0085$, thus we will se it as CP in the pruned tree.
+
+### Pruning
+
+Pruning in the context of decision trees refers to the process of removing parts of the tree that do not contribute significantly to its predictive accuracy. The primary aim of pruning is to simplify the model, prevent overfitting, and enhance its generalization to new, unseen data.
+
+```{r}
+heart.tree.fit.pruned = rpart(target~., data = heart.train, method = "class", control = rpart.control(cp = 0.0085))
+rpart.plot(heart.tree.fit.pruned)
+printcp(heart.tree.fit.pruned)
+plotcp(heart.tree.fit.pruned)
+
+heart.tree.fit.pruned.pred = predict(heart.tree.fit.pruned, heart.test, type = "class")
+heart.tree.fit.pruned.testMSE = mean((heart.test$target-(as.numeric(heart.tree.fit.pruned.pred) - 1))^2)
+heart.tree.fit.pruned.testMSE
+```
+
+We saw a significant increase in performance with the MSE decreasing to $0.1344538$.
+
+### Bagging
+
+We will now try bagging,or Bootstrap Aggregating, which is an ensemble learning technique designed to enhance accuracy and stability. 
+
+```{r}
+set.seed(313)
+
+heart.tree.fit.bag <- bagging(
+  formula = target ~ .,
+  data = heart.data,
+  nbagg = 150,   
+  coob = TRUE,
+  control = rpart.control(cp = 0.0085)
+)
+
+heart.tree.fit.bag
+
+```
+
+We tried with 150 bootstrap replications and obtained a test MSE of $0.3176$, which is not good enough for our model and thus will be discarded.
+
+### Random Forest
+
+Random forest, another ensemble technique, leverages the power of bagging by constructing multiple decision trees on different subsets of the training data, introducing randomness in the process. The randomness is twofold: first, in the bootstrap sampling of data, and second, in the selection of a random subset of features for each node of the trees.
+
+The MSE obtained was $0.07821858$ which is the best performing model thus far.
+
+```{r}
+heart.tree.fit.randomForest = randomForest(target~., data = heart.train)
+heart.tree.fit.randomForest.prob = predict(heart.tree.fit.randomForest, newdata = heart.test)
+
+heart.tree.fit.randomForest.pred = rep(0, nrow(heart.test))
+heart.tree.fit.randomForest.pred[heart.tree.fit.randomForest.prob > .5] = 1
+
+heart.tree.fit.randomForest.testMSE = mean((heart.test$target-(as.numeric(heart.tree.fit.randomForest.pred)))^2)
+heart.tree.fit.randomForest.testMSE
+```
+
+### Boosting
+
+Unlike bagging, boosting assigns different weights to each data point, emphasizing the instances that were misclassified by previous models in the ensemble.
+
+
+```{r}
+heart.tree.fit.boosting = boost <- gbm(target ~ ., data = heart.train,
+                                       distribution = "gaussian",
+                                       n.trees = 1000, shrinkage = 0.01,
+                                       interaction.depth = 4,
+                                       bag.fraction = 0.7,
+                                       n.minobsinnode = 5)
+
+heart.tree.fit.boosting.pred = predict(heart.tree.fit.boosting, heart.test)
+heart.tree.fit.boosting.testMSE = mean((heart.test$target - heart.tree.fit.boosting.pred)^2)
+heart.tree.fit.boosting.testMSE
+
+```
+
+
+# Support Vector Machine
+
+SVMs seek global optimization by identifying a hyperplane that maximally separates classes, reducing sensitivity to local optima.
+We have tried several kernels including `linear`, `radial`, `sigmoid` and `polynomial` and obtained the test MSE for each model. 
+
+```{r}
+svmfit = svm(target ~ ., data = heart.train, kernel = "linear", cost = 10, scale = FALSE, type="C-classification")
+predictions = predict(svmfit, heart.test)
+test.mse=mean((heart.test$target-(as.numeric(predictions) - 1))^2)
+test.mse
+```
+
+```{r}
+svmfit = svm(target ~ ., data = heart.train, kernel = "radial", cost = 10, scale = FALSE, type="C-classification")
+predictions = predict(svmfit, heart.test)
+test.mse=mean((heart.test$target-(as.numeric(predictions) - 1))^2)
+test.mse
+```
+
+```{r}
+svmfit = svm(target ~ ., data = heart.train, kernel = "sigmoid", cost = 10, scale = FALSE, type="C-classification")
+predictions = predict(svmfit, heart.test)
+test.mse=mean((heart.test$target-(as.numeric(predictions) - 1))^2)
+test.mse
+```
+
+```{r}
+svmfit = svm(target ~ ., data = heart.train, kernel = "polynomial", cost = 10, scale = FALSE, type="C-classification", degree = 1)
+predictions = predict(svmfit, heart.test)
+test.mse=mean((heart.test$target-(as.numeric(predictions) - 1))^2)
+test.mse
+```
+
+```{r}
+svmfit = svm(target ~ ., data = heart.train, kernel = "polynomial", cost = 10, scale = FALSE, type="C-classification", degree = 2)
+predictions = predict(svmfit, heart.test)
+test.mse=mean((heart.test$target-(as.numeric(predictions) - 1))^2)
+test.mse
+```
+
+```{r}
+svmfit = svm(target ~ ., data = heart.train, kernel = "polynomial", cost = 10, scale = FALSE, type="C-classification", degree = 3)
+predictions = predict(svmfit, heart.test)
+test.mse=mean((heart.test$target-(as.numeric(predictions) - 1))^2)
+test.mse
+```
+
+```{r}
+svmfit = svm(target ~ ., data = heart.train, kernel = "polynomial", cost = 10, scale = FALSE, type="C-classification", degree = 4)
+predictions = predict(svmfit, heart.test)
+test.mse=mean((heart.test$target-(as.numeric(predictions) - 1))^2)
+test.mse
+```
+
+```{r}
+svmfit = svm(target ~ ., data = heart.train, kernel = "polynomial", cost = 10, scale = FALSE, type="C-classification", degree = 5)
+predictions = predict(svmfit, heart.test)
+test.mse=mean((heart.test$target-(as.numeric(predictions) - 1))^2)
+test.mse
+```
+
+The model with the polynomial kernel of degree 1 proved to be the best performing with an MSE of $0.1428571$ closely followed by the model with a `linear` kernel with an MSE of $0.1554622$.
+
+We then utilized "for loops" to try a combination of costs and gamma values to get the best ones. Results showed that the model with the best performance had a cost of $1$ and gamma of $7$.
+
+***We put a comment on this code as it takes ages to run all the SVMs with different combinations, yes the mentioned above are the results but you can try at your own risk!!***
+
+```{r}
+#bestMSE = 100
+#bestCost = 1
+#bestGamma = 1
+#for (i in 1: 10) {
+#  for (j in 1:10){
+#    tempSVMfit = svm(target ~ ., data = heart.train, kernel = "polynomial", cost = i, scale = FALSE, #type="C-classification", degree = 1, gamma = j)
+#    tempPredictions = predict(tempSVMfit, heart.test)
+#    tempTest.mse=mean((heart.test$target-(as.numeric(tempPredictions) - 1))^2)
+#    if (tempTest.mse < bestMSE) {
+#      bestMSE = tempTest.mse
+#      bestCost = i
+#      bestGamma = j
+#    }
+#  }
+#}
+#
+#bestMSE
+#bestCost
+#bestGamma
+```
+
+# Dimentionality Reduction
+
+### PCA
+
+Principal Component Analysis (PCA) is favored for dimensionality reduction as it maximizes data variance in fewer components, ensuring crucial information retention. PCA also aids in noise reduction by focusing on significant patterns and prevents overfitting, improving model generalization. 
+
+```{r}
+heart.PCA = princomp(correlation)
+summary(heart.PCA)
+
+fviz_eig(heart.PCA, addlabels = TRUE)
+```
+
+After performing PCA, we obtained 12 components. Plotting the results shows us that the first 6 components explain about $90$ percent of the data.This plot shows the eigenvalues in a downward curve, from highest to lowest.
+
+```{r}
+fviz_pca_var(heart.PCA, col.var = "cos2",
+            gradient.cols = c("black", "orange", "green"),
+            repel = TRUE)
+
+```
+
+It is possible to discern three key details from the preceding plot:
+- First, all the variables that are grouped together are positively correlated to each other. For example here we have strong positive correlation between ST slope and exercise angina. 
+- Then, the higher the distance between the variable and the origin, the better represented that variable is. Here, for example, the ST slope has a higher magnitude than age.
+- Finally, variables that are negatively correlated are displayed to the opposite sides of the biplot’s origin.
+
+## Elbow Method
+
+```{r}
+set.seed(666)
+fviz_nbclust(heart.data[, -10], kmeans, method = "wss")
+
+```
+
+Here we are doing the elbow partitioning method, such that the total within cluster sum of square (wss) is minimized. The location of the bend , in our case at 2, shows that it is the apropriate number of clusters.
+
+## Silhouette Method
+
+```{r}
+set.seed(666)
+fviz_nbclust(heart.data[, -10], kmeans, method = "silhouette")
+```
+
+The average silhouette approach measures the quality of a clustering. That is, it determines how well each object lies within its cluster. A high average silhouette width indicates a good clustering.
+
+## K-Means Clustering
+
+```{r}
+set.seed(666)
+heart.cluster.fit = kmeans(heart.data[, -10], 2, nstart = 25)
+print(heart.cluster.fit)
+fviz_cluster(heart.cluster.fit, data = heart.data)
+
+```
+
+With most of these approaches suggesting 2 as the number of optimal clusters, we can perform the final analysis and extract the results using 2 clusters. We also visualized the results using `fviz_cluster()`.
+
+## Hierarchichal clustering
+
+```{r}
+d = dist(heart.data, method = 'euclidean')
+h = hclust(d, method = "complete")
+
+plot(h)
+
+ao = as.dendrogram(h)
+ad = color_branches(ao, h = 400)
+plot(ad)
+
+```
+
+The hierarchical clustering process involves iteratively merging or splitting clusters based on a specified distance metric or dissimilarity measure. This method resulted in a dendrogram, which split the clusters with a height of 400, giving us 2 clusters. It was then plotted for visualization.
+
+# CV Analysis
+
+```{r}
+testMSEs = c()
+for (i in 1: 10){
+  folds = createFolds(heart.data$target, k = 10)
+  
+  cv = lapply(folds, function(x) { 
+  
+    training_fold = heart.data[-x, ] 
+    test_fold = heart.data[x, ]
+    
+    classifier = svm(target ~ ., data = training_fold, kernel = "polynomial", cost = i, scale = FALSE, type="C-classification", degree = 1, gamma = i)
+  
+    y_pred = predict(classifier, newdata = test_fold)
+    return(mean((test_fold$target-(as.numeric(y_pred) - 1))^2))
+  })
+  
+  testMSEs[i] = as.numeric(cv)
+}
+
+plot(c(1:10), testMSEs, type = "b", xlab = "Gamma Values", ylab = "CV Test MSE", main = "Gamma Values VS CV Test MSE")
+```
+
+We finally decided to incorporate CV on our SVM to identify the best and optimal `gamma`. Plotting of the results reveal that the best one had a value of $3$.
+
+# Discussion and Conclusion
+
+Among the decision tree models, Random Forests emerged as the top-performing algorithm, giing the lowest MSE and showcasing its efficacy in predicting heart disease outcomes. SVMs, particularly those employing a polynomial kernel of degree 1, also exhibited strong predictive power.
+
+Furthermore, dimensionality reduction through PCA revealed that the first six principal components capture a substantial portion (approximately 90%) of the data's variance. Clustering analysis using the k-means algorithm revealed potential patterns within the dataset. Silhouette analysis and the elbow method suggested that two clusters may be optimal, providing a useful perspective on the underlying structure of the data.
+
+Finally, we have successfully used SVMs and Random Forests to forecast cardiovascular illnesses. Our comprehension of the dataset's structure was improved by the useful insights that dimensionality reduction via PCA and clustering offered. The results highlight the importance of these models in creating precise forecasts and provide useful information for making well-informed decisions on cardiovascular health.
+
